@@ -20,6 +20,7 @@ import (
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/credentialprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/envprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/targetpath"
+	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/tlsprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/mountpoint"
 	mpmounter "github.com/awslabs/mountpoint-s3-csi-driver/pkg/mountpoint/mounter"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/mountpoint/mountoptions"
@@ -59,6 +60,7 @@ type PodMounter struct {
 	kubernetesVersion string
 	variant           cluster.Variant
 	credProvider      credentialprovider.ProviderInterface
+	tlsProvider       tlsprovider.ProviderInterface
 	nodeID            string
 }
 
@@ -78,6 +80,7 @@ func NewPodMounter(
 		podWatcher:        podWatcher,
 		s3paCache:         s3paCache,
 		credProvider:      credProvider,
+		tlsProvider:       tlsprovider.New(),
 		mount:             mount,
 		kubeletPath:       util.ContainerKubeletPath(),
 		mountSyscall:      mountSyscall,
@@ -102,7 +105,7 @@ func NewPodMounter(
 //
 // If Mountpoint is already mounted at `target`, it will return early at step 3 to ensure credentials are up-to-date.
 // If Mountpoint is already mounted at `source`, it will skip steps 4-7 and only perform bind mount to `target`.
-func (pm *PodMounter) Mount(ctx context.Context, bucketName string, target string, credentialCtx credentialprovider.ProvideContext, args mountpoint.Args, fsGroup string, userEnv envprovider.Environment) error {
+func (pm *PodMounter) Mount(ctx context.Context, bucketName string, target string, credentialCtx credentialprovider.ProvideContext, tlsCtx tlsprovider.ProvideContext, args mountpoint.Args, fsGroup string, userEnv envprovider.Environment) error {
 	volumeName, err := pm.volumeNameFromTargetPath(target)
 	if err != nil {
 		return fmt.Errorf("Failed to extract volume name from %q: %w", target, err)
@@ -117,6 +120,10 @@ func (pm *PodMounter) Mount(ctx context.Context, bucketName string, target strin
 	}
 
 	if isTargetMountPoint && pm.IsSystemDMountpoint(target) {
+		if tlsprovider.HasTLSMaterial(tlsCtx.Secrets) {
+			return fmt.Errorf("mTLS / custom CA bundle via nodePublishSecretRef is not supported for legacy SystemD mounts at %q; recreate the volume to use the Pod-based mounter", target)
+		}
+
 		klog.Infof("Target %q is SystemD Mountpoint. Will only refresh credentials.", target)
 		credentialCtx.SetAsSystemDMountpoint()
 		credentialsPath := hostPluginDirWithDefault()
@@ -160,6 +167,11 @@ func (pm *PodMounter) Mount(ctx context.Context, bucketName string, target strin
 	if err != nil {
 		klog.Errorf("Failed to provide credentials for %q: %v. %s", source, err, pm.helpMessageForGettingMountpointLogs(pod))
 		return fmt.Errorf("Failed to provide credentials for %q: %w. %s", source, err, pm.helpMessageForGettingMountpointLogs(pod))
+	}
+
+	if err := pm.provideTLS(podPath, tlsCtx, args); err != nil {
+		klog.Errorf("Failed to materialize TLS material for %q: %v. %s", source, err, pm.helpMessageForGettingMountpointLogs(pod))
+		return fmt.Errorf("Failed to materialize TLS material for %q: %w. %s", source, err, pm.helpMessageForGettingMountpointLogs(pod))
 	}
 
 	if !isSourceMountPoint {
@@ -472,6 +484,40 @@ func (pm *PodMounter) ensureCredentialsDirExists(podPath string) (string, error)
 // credentialsDir returns credentials dir for `podPath`.
 func (pm *PodMounter) credentialsDir(podPath string) string {
 	return mppod.PathOnHost(podPath, mppod.KnownPathCredentials)
+}
+
+// provideTLS materializes any TLS Secret data into the Mountpoint Pod's tls/ directory and
+// injects the corresponding --ca-bundle / --client-cert / --client-key args. If the caller
+// did not supply any TLS material it is a no-op.
+func (pm *PodMounter) provideTLS(podPath string, tlsCtx tlsprovider.ProvideContext, args mountpoint.Args) error {
+	if !tlsprovider.HasTLSMaterial(tlsCtx.Secrets) {
+		return nil
+	}
+
+	tlsDir, err := pm.ensureTLSDirExists(podPath)
+	if err != nil {
+		return fmt.Errorf("Failed to create tls directory: %w", err)
+	}
+
+	tlsCtx.SetWriteAndEnvPath(tlsDir, mppod.PathInsideMountpointPod(mppod.KnownPathTLS))
+	return pm.tlsProvider.Provide(tlsCtx, args)
+}
+
+// ensureTLSDirExists ensures the tls/ dir for podPath exists. Returns the host-side path.
+func (pm *PodMounter) ensureTLSDirExists(podPath string) (string, error) {
+	tlsBasepath := pm.tlsDir(podPath)
+	err := os.Mkdir(tlsBasepath, tlsprovider.TLSDirPerm)
+	if err != nil && !errors.Is(err, fs.ErrExist) {
+		klog.V(4).Infof("Failed to create tls directory for pod %s: %v", podPath, err)
+		return "", err
+	}
+
+	return tlsBasepath, nil
+}
+
+// tlsDir returns the host-side tls/ dir for podPath.
+func (pm *PodMounter) tlsDir(podPath string) string {
+	return mppod.PathOnHost(podPath, mppod.KnownPathTLS)
 }
 
 // podPath returns `pod`'s basepath inside kubelet's path.

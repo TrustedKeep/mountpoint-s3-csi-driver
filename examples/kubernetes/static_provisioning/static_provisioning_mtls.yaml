@@ -1,0 +1,88 @@
+---
+# Kubernetes Secret carrying the TLS material for the S3 endpoint.
+# Recognized keys:
+#   ca.crt   -> mount-s3 --ca-bundle    (PEM-encoded CA bundle; optional)
+#   tls.crt  -> mount-s3 --client-cert  (PEM-encoded client cert; required with tls.key)
+#   tls.key  -> mount-s3 --client-key   (PEM-encoded client private key; required with tls.crt)
+#
+# All three keys are optional; supply only what your endpoint requires. The Secret is
+# read by kubelet (using its own identity, no extra driver RBAC) and delivered to the
+# CSI driver via the nodePublishSecretRef on the PersistentVolume.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-mtls
+  namespace: default
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Private CA that signed your S3 endpoint's server certificate.
+    -----END CERTIFICATE-----
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    # Client certificate presented to the S3 endpoint for mTLS.
+    -----END CERTIFICATE-----
+  tls.key: |
+    -----BEGIN PRIVATE KEY-----
+    # Unencrypted private key matching tls.crt. Passphrase-protected keys are not supported.
+    -----END PRIVATE KEY-----
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3-pv-mtls
+spec:
+  capacity:
+    storage: 1200Gi # Ignored, required
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  claimRef:
+    namespace: default
+    name: s3-pvc-mtls
+  mountOptions:
+    - region us-east-1
+    - endpoint-url https://s3.example.internal
+    # Do NOT also specify --ca-bundle / --client-cert / --client-key here when using
+    # nodePublishSecretRef; NodePublishVolume will reject the request with InvalidArgument.
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: s3-csi-driver-volume-mtls
+    volumeAttributes:
+      bucketName: s3-csi-driver
+    # Kubelet reads this Secret and passes its data to the driver in NodePublishVolume.
+    nodePublishSecretRef:
+      name: s3-mtls
+      namespace: default
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s3-pvc-mtls
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 1200Gi
+  volumeName: s3-pv-mtls
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: s3-app-mtls
+spec:
+  containers:
+    - name: app
+      image: ubuntu
+      command: ["/bin/sh"]
+      args: ["-c", "echo 'Hello over mTLS!' >> /data/$(date -u).txt; tail -f /dev/null"]
+      volumeMounts:
+        - name: persistent-storage
+          mountPath: /data
+  volumes:
+    - name: persistent-storage
+      persistentVolumeClaim:
+        claimName: s3-pvc-mtls

@@ -20,6 +20,10 @@ const KnownPathMountExit = "mount.exit"
 // KnownPathCredentials is the base directory for storing credential files.
 const KnownPathCredentials = "credentials"
 
+// KnownPathTLS is the base directory for storing TLS material (CA bundle and client cert/key)
+// delivered to the Mountpoint Pod via a CSI nodePublishSecretRef.
+const KnownPathTLS = "tls"
+
 // CommunicationDirName is the name of `emptyDir` volume each Mountpoint Pod will create
 // for the communication between Mountpoint Pod and the CSI Driver Node Pod.
 // Each Pod will have a different view for the files inside this folder,

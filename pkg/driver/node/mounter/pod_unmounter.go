@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/credentialprovider"
+	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/tlsprovider"
 	mpmounter "github.com/awslabs/mountpoint-s3-csi-driver/pkg/mountpoint/mounter"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/podmounter/mppod"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/podmounter/mppod/watcher"
@@ -37,6 +38,7 @@ type PodUnmounter struct {
 	kubeletPath  string
 	podWatcher   *watcher.Watcher
 	credProvider credentialprovider.ProviderInterface
+	tlsProvider  tlsprovider.ProviderInterface
 }
 
 // NewPodUnmounter creates a new PodUnmounter instance with the given parameters
@@ -52,6 +54,7 @@ func NewPodUnmounter(
 		kubeletPath:  util.ContainerKubeletPath(),
 		podWatcher:   podWatcher,
 		credProvider: credProvider,
+		tlsProvider:  tlsprovider.New(),
 	}
 }
 
@@ -171,6 +174,11 @@ func (u *PodUnmounter) cleanUnmount(mpPod *corev1.Pod) {
 		return
 	}
 
+	if err := u.cleanupTLS(mpPod); err != nil {
+		klog.Errorf("Failed to cleanup TLS material of Mountpoint Pod %q: %v", mpPod.Name, err)
+		return
+	}
+
 	if wasMountpoint {
 		klog.Infof("Mountpoint Pod %q successfully unmounted", mpPod.Name)
 	}
@@ -238,6 +246,13 @@ func (u *PodUnmounter) cleanupCredentials(mpPod *corev1.Pod) error {
 		PodID:     string(mpPod.UID),
 		WritePath: mppod.PathOnHost(u.podPath(string(mpPod.UID)), mppod.KnownPathCredentials),
 		MountKind: credentialprovider.MountKindPod,
+	})
+}
+
+// cleanupTLS removes TLS material (CA/client cert/client key) associated with the Mountpoint Pod.
+func (u *PodUnmounter) cleanupTLS(mpPod *corev1.Pod) error {
+	return u.tlsProvider.Cleanup(tlsprovider.CleanupContext{
+		WritePath: mppod.PathOnHost(u.podPath(string(mpPod.UID)), mppod.KnownPathTLS),
 	})
 }
 

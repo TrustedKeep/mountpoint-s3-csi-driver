@@ -24,6 +24,9 @@ const (
 	ArgDebug           = "--debug"
 	ArgDebugCRT        = "--debug-crt"
 	ArgFsTab           = "-o"
+	ArgCABundle        = "--ca-bundle"
+	ArgClientCert      = "--client-cert"
+	ArgClientKey       = "--client-key"
 )
 
 // An ArgKey represents the key of an argument.

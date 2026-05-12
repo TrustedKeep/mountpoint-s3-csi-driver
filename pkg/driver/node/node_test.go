@@ -13,6 +13,7 @@ import (
 
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/credentialprovider"
+	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/tlsprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/envprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/mounter"
 	mock_driver "github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/mounter/mocks"
@@ -77,6 +78,7 @@ func TestNodePublishVolume(t *testing.T) {
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
 					gomock.Any(),
+					gomock.Any(),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
 				)
@@ -115,6 +117,7 @@ func TestNodePublishVolume(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--read-only", "--allow-root"})),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -157,6 +160,7 @@ func TestNodePublishVolume(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--bar", "--foo", "--read-only", "--allow-root", "--test=123"})),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -227,6 +231,7 @@ func TestNodePublishVolume(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--read-only", "--allow-root", "--test=123"})),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -286,6 +291,7 @@ func TestNodePublishVolume(t *testing.T) {
 						ServiceAccountTokens: tokensJSON,
 					}),
 					gomock.Any(),
+					gomock.Any(),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
 				)
@@ -323,6 +329,7 @@ func TestNodePublishVolume(t *testing.T) {
 						AuthenticationSource: credentialprovider.AuthenticationSourcePod,
 						ServiceAccountTokens: tokensJSON,
 					}),
+					gomock.Any(),
 					gomock.Any(),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -366,6 +373,7 @@ func TestNodePublishVolume(t *testing.T) {
 						ServiceAccountTokens: secretsTokens,
 					}),
 					gomock.Any(),
+					gomock.Any(),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
 				)
@@ -401,6 +409,7 @@ func TestNodePublishVolume(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Any(),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{
@@ -438,6 +447,75 @@ func TestNodePublishVolume(t *testing.T) {
 				expectedErrMsg := "environment variable not allowed: mountpointEnv.FOO"
 				if !strings.Contains(err.Error(), expectedErrMsg) {
 					t.Errorf("Expected error message %q, but got %q", expectedErrMsg, err.Error())
+				}
+
+				nodeTestEnv.mockCtl.Finish()
+			},
+		},
+		{
+			name: "failure: TLS Secret conflicts with --ca-bundle in mountOptions",
+			testFunc: func(t *testing.T) {
+				nodeTestEnv := initNodeServerTestEnv(t)
+				ctx := context.Background()
+				req := &csi.NodePublishVolumeRequest{
+					VolumeId: volumeId,
+					VolumeCapability: &csi.VolumeCapability{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{
+								MountFlags: []string{"--ca-bundle=/etc/ssl/raw.pem"},
+							},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+						},
+					},
+					TargetPath:    targetPath,
+					VolumeContext: map[string]string{"bucketName": bucketName},
+					Secrets:       map[string]string{"ca.crt": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"},
+				}
+
+				_, err := nodeTestEnv.server.NodePublishVolume(ctx, req)
+				if err == nil {
+					t.Fatal("NodePublishVolume succeeded; expected conflict error")
+				}
+				if !strings.Contains(err.Error(), "--ca-bundle") {
+					t.Errorf("expected error to mention --ca-bundle, got: %v", err)
+				}
+
+				nodeTestEnv.mockCtl.Finish()
+			},
+		},
+		{
+			name: "failure: TLS Secret conflicts with --client-cert and --client-key in mountOptions",
+			testFunc: func(t *testing.T) {
+				nodeTestEnv := initNodeServerTestEnv(t)
+				ctx := context.Background()
+				req := &csi.NodePublishVolumeRequest{
+					VolumeId: volumeId,
+					VolumeCapability: &csi.VolumeCapability{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{
+								MountFlags: []string{"--client-cert=/etc/ssl/c.pem", "--client-key=/etc/ssl/c.key"},
+							},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+						},
+					},
+					TargetPath:    targetPath,
+					VolumeContext: map[string]string{"bucketName": bucketName},
+					Secrets: map[string]string{
+						"tls.crt": "cert",
+						"tls.key": "key",
+					},
+				}
+
+				_, err := nodeTestEnv.server.NodePublishVolume(ctx, req)
+				if err == nil {
+					t.Fatal("NodePublishVolume succeeded; expected conflict error")
+				}
+				if !strings.Contains(err.Error(), "--client-cert") || !strings.Contains(err.Error(), "--client-key") {
+					t.Errorf("expected error to mention --client-cert and --client-key, got: %v", err)
 				}
 
 				nodeTestEnv.mockCtl.Finish()
@@ -490,6 +568,7 @@ func TestNodePublishVolumeForPodMounter(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--gid=123", "--allow-other", "--dir-mode=770", "--file-mode=660"})),
 					gomock.Eq("123"),
 					gomock.Eq(envprovider.Environment{}),
@@ -532,6 +611,7 @@ func TestNodePublishVolumeForPodMounter(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--gid=123", "--allow-other", "--dir-mode=770", "--file-mode=660"})),
 					gomock.Eq("123"),
 					gomock.Eq(envprovider.Environment{}),
@@ -574,6 +654,7 @@ func TestNodePublishVolumeForPodMounter(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--allow-root"})),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -616,6 +697,7 @@ func TestNodePublishVolumeForPodMounter(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs([]string{"--allow-other"})),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -659,6 +741,7 @@ func TestNodePublishVolumeForPodMounter(t *testing.T) {
 						VolumeID:             volumeId,
 						AuthenticationSource: credentialprovider.AuthenticationSourceDriver,
 					}),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs(mountFlags)),
 					gomock.Eq("123"),
 					gomock.Eq(envprovider.Environment{}),
@@ -848,6 +931,7 @@ func TestNodePublishVolumeMaxCacheSizeInjection(t *testing.T) {
 					gomock.Eq(bucketName),
 					gomock.Eq(targetPath),
 					gomock.Any(),
+					gomock.Any(),
 					gomock.Eq(mountpoint.ParseArgs(tc.expectedArgs)),
 					gomock.Eq(""),
 					gomock.Eq(envprovider.Environment{}),
@@ -998,7 +1082,7 @@ var _ mounter.Mounter = &dummyMounter{}
 
 type dummyMounter struct{}
 
-func (d *dummyMounter) Mount(ctx context.Context, bucketName string, target string, provideCtx credentialprovider.ProvideContext, args mountpoint.Args, fsGroup string, userEnv envprovider.Environment) error {
+func (d *dummyMounter) Mount(ctx context.Context, bucketName string, target string, provideCtx credentialprovider.ProvideContext, tlsCtx tlsprovider.ProvideContext, args mountpoint.Args, fsGroup string, userEnv envprovider.Environment) error {
 	return nil
 }
 

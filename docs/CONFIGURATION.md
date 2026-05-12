@@ -459,6 +459,59 @@ csi:
 
 Alternatively, the CSI Driver will detect the `--region` argument specified in the Mountpoint options.
 
+## TLS and mutual TLS for S3-compatible endpoints
+
+When mounting against an S3-compatible endpoint that uses a private certificate authority or requires mutual TLS, supply the TLS material to the CSI driver via a standard Kubernetes Secret referenced from the PersistentVolume's `csi.nodePublishSecretRef`. Kubelet reads the Secret using its own identity and delivers the data to the CSI driver — no extra driver RBAC is required.
+
+The driver recognises three well-known keys in the Secret data:
+
+| Secret key | `mount-s3` flag           | Notes                                                         |
+| ---------- | ------------------------- | ------------------------------------------------------------- |
+| `ca.crt`   | `--ca-bundle <PATH>`      | Optional. PEM-encoded CA bundle for server-cert validation.   |
+| `tls.crt`  | `--client-cert <PATH>`    | Optional. Required together with `tls.key`. Linux only.       |
+| `tls.key`  | `--client-key <PATH>`     | Optional. Required together with `tls.crt`. Linux only.       |
+
+If only `ca.crt` is supplied, the driver enables server-cert validation against the private CA. If `tls.crt` and `tls.key` are supplied (which must appear together), the driver also enables client-side mTLS. The CSI driver materialises the PEM data inside the Mountpoint Pod's communication directory and injects the corresponding flags into the `mount-s3` invocation.
+
+Example PV:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3-pv-mtls
+spec:
+  # ...
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: s3-csi-driver-volume-mtls
+    volumeAttributes:
+      bucketName: s3-csi-driver
+    nodePublishSecretRef:
+      name: s3-mtls
+      namespace: default
+```
+
+A complete runnable manifest is available at [`examples/kubernetes/static_provisioning/static_provisioning_mtls.yaml`](../examples/kubernetes/static_provisioning/static_provisioning_mtls.yaml).
+
+### Conflicting mount options
+
+`--ca-bundle`, `--client-cert`, and `--client-key` are managed by the CSI driver when a Secret is referenced. If any of them are also listed in the PV's `mountOptions`, `NodePublishVolume` rejects the mount with `InvalidArgument`. Pick one source — either configure the Secret or set the flags directly in `mountOptions`, not both.
+
+### AWS credential-chain compatibility warning
+
+Mountpoint applies the configured CA bundle to **every** outbound HTTPS connection, including calls to the EC2 Instance Metadata Service (IMDS) and AWS STS made by the default credential-provider chain. If your private CA bundle does not chain to the public Amazon trust anchors, those credential calls fail certificate validation and the mount will be unable to authenticate to AWS. Three workable patterns:
+
+1. **Include the public AWS roots in your `ca.crt`.** Concatenate the public Amazon trust chain with your private CA before storing it in the Secret. This preserves IRSA/EKS Pod Identity flows.
+2. **Use `--no-sign-request` in `mountOptions`.** Appropriate when the S3-compatible endpoint does not actually validate AWS SigV4 credentials.
+3. **Use a `--profile` with pre-materialised static credentials** (and the Kubernetes-Secrets driver-level credential method described above), so the default chain does not need to reach IMDS or STS.
+
+This constraint is inherited from Mountpoint itself; see the [TLS section of the Mountpoint configuration documentation](https://github.com/awslabs/mountpoint-s3/blob/main/doc/CONFIGURATION.md) for further detail.
+
+### Platform support
+
+Client-side mTLS (`--client-cert` / `--client-key`) is supported only on Linux nodes. The CSI driver targets Linux nodes exclusively, so this is not a practical limitation; the configuration is documented here for completeness. The `--ca-bundle` flag works on all platforms supported by Mountpoint. Passphrase-protected client private keys are not supported.
+
 ## Configure driver toleration settings
 Toleration of all taints for the node daemon is set to `true` by default. If you don't want to deploy the driver on all nodes, add
 policies to `Value.node.tolerations` to configure customized toleration for nodes.

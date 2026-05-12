@@ -34,6 +34,7 @@ import (
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/envprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/mounter"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/targetpath"
+	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/tlsprovider"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/driver/node/volumecontext"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/mountpoint"
 	"github.com/awslabs/mountpoint-s3-csi-driver/pkg/util"
@@ -132,6 +133,16 @@ func (ns *S3NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePubl
 		return nil, status.Error(codes.InvalidArgument, "Running mount-s3 with mount flag -o is not supported in CSI Driver.")
 	}
 
+	secrets := req.GetSecrets()
+	if tlsprovider.HasTLSMaterial(secrets) {
+		conflicting := tlsArgConflicts(args)
+		if len(conflicting) > 0 {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"TLS material was provided via nodePublishSecretRef, but the following mount flag(s) also appear in mountOptions: %v. Remove them from mountOptions; the CSI Driver will set them from the Secret.",
+				conflicting)
+		}
+	}
+
 	fsGroup := ""
 	if capMount := volCap.GetMount(); capMount != nil {
 		if volumeMountGroup := capMount.GetVolumeMountGroup(); volumeMountGroup != "" {
@@ -201,7 +212,9 @@ func (ns *S3NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePubl
 		return nil, status.Errorf(codes.InvalidArgument, "Could not parse user environment: %v", err)
 	}
 
-	if err := ns.Mounter.Mount(ctx, bucket, targetContainer, credentialCtx, args, fsGroup, userEnv); err != nil {
+	tlsCtx := tlsprovider.ProvideContext{Secrets: secrets}
+
+	if err := ns.Mounter.Mount(ctx, bucket, targetContainer, credentialCtx, tlsCtx, args, fsGroup, userEnv); err != nil {
 		os.Remove(targetContainer)
 		return nil, status.Errorf(codes.Internal, "Could not mount %q at %q: %v", bucket, targetContainer, err)
 	}
@@ -358,6 +371,19 @@ func podIDFromTargetPath(target string) (string, bool) {
 		return "", false
 	}
 	return targetPath.PodID, true
+}
+
+// tlsArgConflicts returns the mount-s3 flag keys that are present in args AND would also be
+// set by tlsprovider. Used to surface a clear error when a user supplies both a Secret and
+// raw flags pointing at the same setting.
+func tlsArgConflicts(args mountpoint.Args) []string {
+	var conflicts []string
+	for _, key := range tlsprovider.TLSArgKeys() {
+		if args.Has(key) {
+			conflicts = append(conflicts, key)
+		}
+	}
+	return conflicts
 }
 
 // logSafeNodePublishVolumeRequest returns a copy of given `csi.NodePublishVolumeRequest`
