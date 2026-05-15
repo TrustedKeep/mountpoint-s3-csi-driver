@@ -8,4 +8,6 @@ go.work.sum
 .github/artifacts/data.json
 cover.out
 cover.html
-.terraform/
+.terraform/corp-ca.pem
+tkbuild.sh
+corp-ca.pem

@@ -17,6 +17,13 @@ ARG MOUNTPOINT_REPOSITORY
 ARG MOUNTPOINT_BRANCH
 ARG MOUNTPOINT_BUILD_ARGS
 
+# Trust corporate MITM CA before any network calls
+COPY corp-ca.pem /etc/pki/ca-trust/source/anchors/corp-ca.pem
+RUN update-ca-trust
+ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
+ENV GIT_SSL_CAINFO=/etc/pki/tls/certs/ca-bundle.crt
+ENV CARGO_HTTP_CAINFO=/etc/pki/tls/certs/ca-bundle.crt
+
 # Install build tools
 RUN dnf upgrade -y && \
     dnf install -y \
@@ -32,10 +39,17 @@ RUN dnf upgrade -y && \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Clone Mountpoint
-RUN git clone --recurse-submodules -j8 \
-    --single-branch --branch ${MOUNTPOINT_BRANCH} --depth 1 \
-    ${MOUNTPOINT_REPOSITORY} mountpoint-s3
+# Configure git for corporate proxy: force HTTP/1.1, raise buffer, allow long timeouts
+RUN git config --global http.version HTTP/1.1 && \
+    git config --global http.postBuffer 524288000 && \
+    git config --global http.lowSpeedLimit 1000 && \
+    git config --global http.lowSpeedTime 300
+
+# Clone Mountpoint (serial submodule fetch to avoid proxy mangling large repos like aws-lc)
+RUN git clone --single-branch --branch ${MOUNTPOINT_BRANCH} --depth 1 \
+    ${MOUNTPOINT_REPOSITORY} mountpoint-s3 && \
+    cd mountpoint-s3 && \
+    git submodule update --init --recursive --depth 1
 
 # Build Mountpoint
 RUN cd mountpoint-s3 && \
@@ -48,6 +62,12 @@ RUN cd mountpoint-s3 && \
 # Use BUILDPLATFORM not TARGETPLATFORM for cross compilation
 FROM --platform=$BUILDPLATFORM public.ecr.aws/eks-distro-build-tooling/golang:1.26.2 as builder
 ARG TARGETARCH
+
+# Trust corporate MITM CA before any network calls
+COPY corp-ca.pem /tmp/corp-ca.pem
+RUN cat /tmp/corp-ca.pem >> /etc/pki/tls/certs/ca-bundle.crt
+ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
+ENV GIT_SSL_CAINFO=/etc/pki/tls/certs/ca-bundle.crt
 
 WORKDIR /go/src/github.com/awslabs/mountpoint-s3-csi-driver
 COPY . .
